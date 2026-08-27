@@ -9,7 +9,7 @@ rapidfuzz==3.10.1
 streamlit==1.40.2
 
 # Cliente LLM (solo para excepciones)
-anthropic==0.40.0
+anthropic==1.1.0
 python-dotenv==1.0.1
 
 # Testing
