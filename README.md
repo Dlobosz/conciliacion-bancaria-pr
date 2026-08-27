@@ -223,6 +223,10 @@ docker build -t conciliador .
 docker run -p 8501:8501 --env-file .env conciliador
 ```
 
+La imagen pesa ~850 MB (pandas + pyarrow + streamlit) y trae el `HEALTHCHECK` apuntando a
+`/_stcore/health`. Solo instala `requirements.txt`: las herramientas de test no se hornean en
+la imagen.
+
 ---
 
 ## Limitaciones conocidas
@@ -236,8 +240,8 @@ docker run -p 8501:8501 --env-file .env conciliador
 - **Los umbrales requieren calibración** por empresa. El umbral fuzzy de 85 y la ventana de 5 días
   funcionan con estos datos; son ajustables desde el dashboard y desde `ParametrosMatching`.
 - **Un solo período a la vez.** Un pago de una factura del mes anterior queda fuera de la ventana.
-- **La imagen Docker corre como root** y no está verificada en este entorno (el daemon local no
-  puede levantar contenedores nuevos). El `Dockerfile` está revisado estáticamente.
+- **La imagen Docker corre como root.** Suficiente para una demo local; un despliegue real
+  debería usar un usuario sin privilegios.
 - **Sin autenticación ni multiusuario.** Es una herramienta de escritorio; escalar a multiusuario
   implica migrar a PostgreSQL (ya está dockerizado, así que el camino está preparado).
 
