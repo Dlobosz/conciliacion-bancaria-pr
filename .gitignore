@@ -1,0 +1,30 @@
+# Entorno virtual
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Secretos
+.env
+
+# Base de datos local
+*.db
+*.sqlite
+*.sqlite3
+
+# Datos procesados (se regeneran con el pipeline)
+data/processed/*
+!data/processed/.gitkeep
+
+# Sistema operativo / editores
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

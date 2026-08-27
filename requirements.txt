@@ -1,0 +1,16 @@
+# Manipulacion de datos
+pandas==2.2.3
+openpyxl==3.1.5
+
+# Fuzzy matching (MIT, implementado en C++)
+rapidfuzz==3.10.1
+
+# Dashboard
+streamlit==1.40.2
+
+# Cliente LLM (solo para excepciones)
+anthropic==0.40.0
+python-dotenv==1.0.1
+
+# Testing
+pytest==8.3.4
