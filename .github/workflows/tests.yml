@@ -1,0 +1,40 @@
+name: tests
+
+# Se corre en cada push a main y en cada pull request: el objetivo es que el
+# motor de conciliacion nunca quede roto sin que se note.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Instalar dependencias
+        run: pip install -r requirements-dev.txt
+
+      - name: Linter
+        run: ruff check src tests app.py
+
+      - name: Tests con cobertura
+        # El umbral de cobertura es una red: hoy el paquete src esta en 97%,
+        # asi que bajar de 90 significa que algo se dejo de probar.
+        run: pytest --cov --cov-report=term --cov-fail-under=90
+
+      - name: Verificar que los datos sinteticos se regeneran igual
+        # El generador usa semilla fija: si el resultado cambia, cambio la
+        # logica de generacion y las metricas del README dejan de ser validas.
+        run: |
+          python -m src.generar_datos
+          git diff --exit-code data/raw/

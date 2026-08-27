@@ -1,5 +1,7 @@
 # Conciliador Bancario Inteligente para PyMEs
 
+[![tests](https://github.com/Dlobosz/conciliacion-bancaria-pr/actions/workflows/tests.yml/badge.svg)](https://github.com/Dlobosz/conciliacion-bancaria-pr/actions/workflows/tests.yml)
+
 Automatiza la **conciliación bancaria** de una PyME chilena: cruza la cartola del banco contra el
 libro de ventas (DTE), identifica qué movimientos coinciden, detecta las diferencias y deja solo
 los casos ambiguos para revisión humana asistida por IA.
@@ -210,6 +212,7 @@ streamlit run app.py             # dashboard en http://localhost:8501
 
 pytest                           # 133 tests
 pytest --cov                     # con reporte de cobertura
+ruff check src tests app.py      # linter
 ```
 
 Para habilitar la IA, copiar `.env.example` a `.env` y completar `ANTHROPIC_API_KEY`. Sin la key
@@ -244,6 +247,16 @@ la imagen.
   debería usar un usuario sin privilegios.
 - **Sin autenticación ni multiusuario.** Es una herramienta de escritorio; escalar a multiusuario
   implica migrar a PostgreSQL (ya está dockerizado, así que el camino está preparado).
+
+---
+
+## Integración continua
+
+Cada push a `main` y cada pull request dispara [el workflow de GitHub Actions](.github/workflows/tests.yml),
+que corre cuatro pasos: linter (`ruff`), los 133 tests, un umbral mínimo de cobertura del 90% —hoy
+está en 97%— y una verificación de que el generador de datos sintéticos sigue produciendo
+exactamente los mismos archivos. Ese último paso protege las métricas del README: si el generador
+cambia, las cifras medidas dejarían de corresponder a los datos versionados.
 
 ---
 
