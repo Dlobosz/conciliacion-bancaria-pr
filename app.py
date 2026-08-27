@@ -134,7 +134,9 @@ st.sidebar.caption(
 # ------------------------------------------------------------------ ejecucion
 
 if conciliar_ahora or "ejecucion" not in st.session_state:
-    ruta_cartola = guardar_subida(cartola_subida, "cartola") if cartola_subida else CARTOLA_POR_DEFECTO
+    ruta_cartola = (
+        guardar_subida(cartola_subida, "cartola") if cartola_subida else CARTOLA_POR_DEFECTO
+    )
     ruta_ventas = guardar_subida(ventas_subidas, "ventas") if ventas_subidas else VENTAS_POR_DEFECTO
 
     parametros = ParametrosMatching(

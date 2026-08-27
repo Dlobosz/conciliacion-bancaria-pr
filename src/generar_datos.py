@@ -60,7 +60,8 @@ def formatear_rut(cuerpo: str) -> str:
 
 
 def sin_tildes(texto: str) -> str:
-    return "".join(c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn")
+    descompuesto = unicodedata.normalize("NFD", texto)
+    return "".join(c for c in descompuesto if unicodedata.category(c) != "Mn")
 
 
 def ensuciar(razon_social: str, rng: random.Random) -> str:
@@ -220,7 +221,7 @@ class Generador:
             doc = self.nuevo_documento(cliente, dia, total)
             cuotas = self.rng.randint(2, 3)
             cortes = sorted(self.rng.sample(range(50_000, total - 50_000), cuotas - 1))
-            montos = [b - a for a, b in zip([0] + cortes, cortes + [total])]
+            montos = [b - a for a, b in zip([0] + cortes, cortes + [total], strict=True)]
             for i, monto in enumerate(montos):
                 mov = self.nuevo_movimiento(
                     dia + i * 3 + 1,

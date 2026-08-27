@@ -37,7 +37,15 @@ CONFIANZA = {
 }
 
 # Bajo este umbral el emparejamiento se propone, pero se marca para revision humana.
-UMBRAL_AUTOMATICO = 0.85
+#
+# El valor esta calibrado para que la marca signifique algo: por encima quedan las
+# pasadas que cruzan por identidad (RUT + monto, con o sin desfase de fecha) y las
+# comisiones; por debajo caen las dos familias que infieren:
+#   - los matches N-a-N, porque una suma de subconjuntos puede cuadrar por casualidad;
+#   - los fuzzy con score justo en el limite del umbral de similitud.
+# Con un umbral mas bajo la bandera nunca se activaba y el KPI de "% automatico"
+# daba 100% siempre.
+UMBRAL_AUTOMATICO = 0.90
 
 
 @dataclass(frozen=True)
@@ -63,7 +71,7 @@ class ParametrosMatching:
     """Bajo el umbral de aceptacion pero suficiente para ofrecerlo como candidato al LLM."""
 
     max_documentos_combinados: int = 4
-    """Tope de facturas que puede cubrir un solo abono (acota el costo de la suma de subconjuntos)."""
+    """Tope de facturas que puede cubrir un solo abono (acota el costo de la combinatoria)."""
 
     max_candidatos_combinacion: int = 12
     """Tope de candidatos que entran a la combinatoria (C(12,4) = 495: barato y suficiente)."""
@@ -485,7 +493,7 @@ def _tabla_conciliaciones(estado: _Estado) -> pd.DataFrame:
     return pd.DataFrame(filas, columns=COLUMNAS_CONCILIACION)
 
 
-def _motivo_movimiento(movimiento, estado: _Estado, params: ParametrosMatching) -> str:
+def _motivo_movimiento(movimiento, estado: _Estado) -> str:
     """Clasifica por que un movimiento quedo pendiente (sin usar IA)."""
     if movimiento.monto < 0:
         return "cargo_sin_documento"
@@ -523,7 +531,7 @@ def _tabla_movimientos_pendientes(estado: _Estado, params: ParametrosMatching) -
                 "monto": movimiento.monto,
                 "rut": movimiento.rut,
                 "contraparte": movimiento.contraparte,
-                "motivo": _motivo_movimiento(movimiento, estado, params),
+                "motivo": _motivo_movimiento(movimiento, estado),
                 "candidatos": "|".join(sugeridos),
             }
         )

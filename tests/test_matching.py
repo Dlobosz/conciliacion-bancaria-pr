@@ -321,3 +321,86 @@ def test_dataset_facturas_impagas_quedan_pendientes(resultado_dataset):
     impagas = {f.id_documento for f in verdad.itertuples() if f.caso == "sin_pago"}
 
     assert impagas <= set(resultado.documentos_pendientes["id_documento"])
+
+
+# ------------------------------------------------- regresiones de la auditoria
+
+
+def test_los_matches_n_a_n_se_marcan_para_revision():
+    """Una suma de subconjuntos puede cuadrar por casualidad: la marca debe activarse.
+
+    Regresion: con el umbral anterior (0.85) ninguna estrategia quedaba nunca por
+    debajo, asi que requiere_revision era siempre False y el KPI de "% automatico"
+    daba 100% en cualquier escenario.
+    """
+    r = correr(
+        [mov("MOV-1", 300_000 + 450_000, dia=2)],
+        [doc("DOC-1", 300_000), doc("DOC-2", 450_000, dia=1)],
+    )
+
+    fila = r.conciliaciones.iloc[0]
+    assert fila["estrategia"] == "uno_a_n"
+    assert fila["requiere_revision"]
+
+
+def test_los_matches_por_identidad_no_se_marcan():
+    r = correr(
+        [mov("MOV-1", 500_000), mov("MOV-2", 300_000, dia=3, rut="77234567-4", contraparte="B")],
+        [doc("DOC-1", 500_000), doc("DOC-2", 300_000, rut="77234567-4", contraparte="B")],
+    )
+    assert not r.conciliaciones["requiere_revision"].any()
+
+
+def test_el_orden_de_las_filas_no_cambia_el_resultado():
+    """Propiedad clave del motor: el resultado depende de los datos, no de como llegaron."""
+    movimientos = [
+        mov("MOV-1", 500_000),
+        mov("MOV-2", 300_000, dia=3, rut="77234567-4", contraparte="ANDINA"),
+        mov("MOV-3", 120_000 + 80_000, dia=2, rut="78567890-7", contraparte="VALLE"),
+        mov("MOV-4", -9_900, contraparte="COMISION"),
+    ]
+    documentos = [
+        doc("DOC-1", 500_000),
+        doc("DOC-2", 300_000, rut="77234567-4", contraparte="ANDINA"),
+        doc("DOC-3", 120_000, dia=1, rut="78567890-7", contraparte="VALLE"),
+        doc("DOC-4", 80_000, dia=1, rut="78567890-7", contraparte="VALLE"),
+    ]
+    base = pares(correr(movimientos, documentos))
+
+    for desplazamiento in range(1, 4):
+        rotados_mov = movimientos[desplazamiento:] + movimientos[:desplazamiento]
+        rotados_doc = documentos[desplazamiento:] + documentos[:desplazamiento]
+        assert pares(correr(rotados_mov, rotados_doc)) == base
+
+
+def test_un_cargo_con_tipo_vacio_no_se_concilia():
+    """Extremo a extremo del bug de signo: el cargo debe llegar al motor como negativo."""
+    import pandas as pd
+
+    from src.limpieza import limpiar_cartola, limpiar_libro_ventas
+
+    cartola = limpiar_cartola(
+        pd.DataFrame(
+            {
+                "fecha": ["2025-06-10"],
+                "descripcion": ["COMISION MANTENCION"],
+                "tipo": [""],
+                "monto": ["-500000"],
+            }
+        )
+    )
+    ventas = limpiar_libro_ventas(
+        pd.DataFrame(
+            {
+                "id_documento": ["DOC-1"],
+                "fecha_emision": ["2025-06-10"],
+                "rut_cliente": ["76.123.456-0"],
+                "razon_social": ["COMERCIAL LOS ALERCES SPA"],
+                "monto_total": ["500000"],
+            }
+        )
+    )
+    resultado = conciliar(cartola, ventas)
+
+    assert resultado.conciliaciones.empty
+    assert resultado.movimientos_pendientes.iloc[0]["motivo"] == "cargo_sin_documento"

@@ -33,8 +33,9 @@ def quitar_sufijos_societarios(texto: str) -> str:
 
 
 def sin_tildes(texto: str) -> str:
-    """ACENTÚA -> ACENTUA (descompone en NFD y bota las marcas diacriticas)."""
-    return "".join(c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn")
+    """ACENTUA -> ACENTUA (descompone en NFD y bota las marcas diacriticas)."""
+    descompuesto = unicodedata.normalize("NFD", texto)
+    return "".join(c for c in descompuesto if unicodedata.category(c) != "Mn")
 
 
 def normalizar_texto(valor) -> str:
@@ -145,6 +146,33 @@ def extraer_contraparte(glosa) -> str:
     return quitar_sufijos_societarios(texto)
 
 
+def ids_unicos(valores: pd.Series | None, prefijo: str, filas: int) -> list[str]:
+    """Garantiza un id no vacio y unico por fila.
+
+    El id es la clave con la que el motor lleva la cuenta de lo ya conciliado y
+    la clave primaria en SQLite. Dos filas con el mismo id harian desaparecer una
+    del informe sin aviso, asi que los vacios se numeran y los repetidos reciben
+    un sufijo (MOV-1, MOV-1-2, MOV-1-3).
+    """
+    crudos = (
+        [""] * filas
+        if valores is None
+        else [("" if pd.isna(v) else str(v).strip()) for v in valores]
+    )
+
+    vistos: set[str] = set()
+    unicos: list[str] = []
+    for posicion, crudo in enumerate(crudos, start=1):
+        base = crudo or f"{prefijo}-{posicion:04d}"
+        candidato, repeticion = base, 1
+        while candidato in vistos:
+            repeticion += 1
+            candidato = f"{base}-{repeticion}"
+        vistos.add(candidato)
+        unicos.append(candidato)
+    return unicos
+
+
 def normalizar_fecha(serie: pd.Series) -> pd.Series:
     """Convierte una columna de fechas a datetime, tolerando dd-mm-yyyy y yyyy-mm-dd."""
     texto = serie.astype(str).str.strip()
@@ -158,20 +186,19 @@ def limpiar_cartola(df: pd.DataFrame) -> pd.DataFrame:
     """Normaliza la cartola bancaria y deja las columnas que consume el matching."""
     limpio = pd.DataFrame(index=df.index)
 
-    limpio["id_movimiento"] = (
-        df["id_movimiento"].astype(str)
-        if "id_movimiento" in df.columns
-        else [f"MOV-{i + 1:04d}" for i in range(len(df))]
-    )
+    limpio["id_movimiento"] = ids_unicos(df.get("id_movimiento"), "MOV", len(df))
     limpio["fecha"] = normalizar_fecha(df["fecha"])
     limpio["descripcion"] = df["descripcion"].astype(str).str.strip()
     limpio["glosa"] = df["descripcion"].map(normalizar_texto)
     limpio["monto"] = df["monto"].map(normalizar_monto)
 
-    # El signo manda sobre la columna 'tipo': un CARGO siempre resta.
+    # Un tipo explicito manda sobre el signo del monto: un CARGO siempre resta.
+    # Si la columna viene vacia o con otro valor, se respeta el signo original;
+    # forzarlo a positivo convertiria una comision bancaria en un abono.
     if "tipo" in df.columns:
-        tipo = df["tipo"].map(normalizar_texto)
-        limpio["monto"] = limpio["monto"].abs() * tipo.map(lambda t: -1 if t == "CARGO" else 1)
+        signo = df["tipo"].map(normalizar_texto).map({"CARGO": -1, "ABONO": 1})
+        conocido = signo.notna()
+        limpio.loc[conocido, "monto"] = limpio.loc[conocido, "monto"].abs() * signo[conocido]
     limpio["tipo"] = limpio["monto"].map(lambda m: "CARGO" if m < 0 else "ABONO")
     limpio["monto_abs"] = limpio["monto"].abs()
 
@@ -185,11 +212,15 @@ def limpiar_libro_ventas(df: pd.DataFrame) -> pd.DataFrame:
     """Normaliza el libro de ventas / registro de DTE."""
     limpio = pd.DataFrame(index=df.index)
 
-    folios = df["folio"].astype(str) if "folio" in df.columns else pd.Series(
-        [str(i + 1) for i in range(len(df))], index=df.index
+    folios = (
+        df["folio"].astype(str)
+        if "folio" in df.columns
+        else pd.Series([str(i + 1) for i in range(len(df))], index=df.index)
     )
-    limpio["id_documento"] = (
-        df["id_documento"].astype(str) if "id_documento" in df.columns else "DOC-" + folios
+    limpio["id_documento"] = ids_unicos(
+        df["id_documento"] if "id_documento" in df.columns else "DOC-" + folios,
+        "DOC",
+        len(df),
     )
     limpio["folio"] = folios
     limpio["tipo_dte"] = df["tipo_dte"].astype(str) if "tipo_dte" in df.columns else "33"

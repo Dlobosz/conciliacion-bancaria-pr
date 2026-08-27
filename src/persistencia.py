@@ -161,7 +161,9 @@ def _fechas_a_texto(df: pd.DataFrame, columnas: list[str]) -> pd.DataFrame:
     return copia
 
 
-def _insertar(conexion: sqlite3.Connection, tabla: str, df: pd.DataFrame, columnas: list[str]) -> None:
+def _insertar(
+    conexion: sqlite3.Connection, tabla: str, df: pd.DataFrame, columnas: list[str]
+) -> None:
     if df.empty:
         return
     df.reindex(columns=columnas).to_sql(tabla, conexion, if_exists="append", index=False)
@@ -212,7 +214,16 @@ def guardar_ejecucion(
         conexion,
         "movimientos",
         movs,
-        ["id_ejecucion", "id_movimiento", "fecha", "descripcion", "tipo", "monto", "rut", "contraparte"],
+        [
+            "id_ejecucion",
+            "id_movimiento",
+            "fecha",
+            "descripcion",
+            "tipo",
+            "monto",
+            "rut",
+            "contraparte",
+        ],
     )
 
     docs = _fechas_a_texto(documentos, ["fecha_emision"]).assign(id_ejecucion=id_ejecucion)
@@ -220,7 +231,16 @@ def guardar_ejecucion(
         conexion,
         "documentos",
         docs,
-        ["id_ejecucion", "id_documento", "folio", "tipo_dte", "fecha_emision", "rut", "razon_social", "monto_total"],
+        [
+            "id_ejecucion",
+            "id_documento",
+            "folio",
+            "tipo_dte",
+            "fecha_emision",
+            "rut",
+            "razon_social",
+            "monto_total",
+        ],
     )
 
     conciliaciones = resultado.conciliaciones.assign(id_ejecucion=id_ejecucion)
@@ -315,9 +335,13 @@ def leer_conciliaciones(conexion: sqlite3.Connection, id_ejecucion: int) -> pd.D
 
     items = leer_tabla(conexion, "conciliacion_items", id_ejecucion)
     agrupados = (
-        items.groupby(["id_conciliacion", "lado"])["id_item"]
-        .apply(lambda ids: "|".join(sorted(ids)))
-        .unstack(fill_value="")
+        items.pivot_table(
+            index="id_conciliacion",
+            columns="lado",
+            values="id_item",
+            aggfunc=lambda ids: "|".join(sorted(ids)),
+            fill_value="",
+        )
         .reindex(columns=["movimiento", "documento"], fill_value="")
     )
 
@@ -395,13 +419,16 @@ def _pendiente(conexion: sqlite3.Connection, id_ejecucion: int, lado: str, id_it
         (id_ejecucion, lado, id_item),
     ).fetchone()
     if fila is None:
-        raise RevisionInvalidaError(f"{id_item} no figura como pendiente de la ejecucion {id_ejecucion}")
+        raise RevisionInvalidaError(
+            f"{id_item} no figura como pendiente de la ejecucion {id_ejecucion}"
+        )
 
     columnas = [d[0] for d in conexion.execute("SELECT * FROM pendientes LIMIT 0").description]
-    pendiente = dict(zip(columnas, fila))
+    pendiente = dict(zip(columnas, fila, strict=True))
     if pendiente["estado_revision"] != "pendiente":
         raise RevisionInvalidaError(
-            f"{id_item} ya fue resuelto ({pendiente['estado_revision']}); reabrelo antes de cambiarlo"
+            f"{id_item} ya fue resuelto ({pendiente['estado_revision']}); "
+            "reabrelo antes de cambiarlo"
         )
     return pendiente
 
@@ -530,7 +557,9 @@ def reabrir_pendiente(
         (id_ejecucion, lado, id_item),
     ).fetchone()
     if fila is None:
-        raise RevisionInvalidaError(f"{id_item} no figura como pendiente de la ejecucion {id_ejecucion}")
+        raise RevisionInvalidaError(
+            f"{id_item} no figura como pendiente de la ejecucion {id_ejecucion}"
+        )
     if fila[0] == "pendiente":
         return
 
@@ -556,7 +585,7 @@ def reabrir_pendiente(
 
 
 def resumen_revision(conexion: sqlite3.Connection, id_ejecucion: int) -> dict:
-    """Cuantos pendientes hay en cada estado, por lado: {'movimiento': {...}, 'documento': {...}}."""
+    """Pendientes por lado y estado: {'movimiento': {'pendiente': 3, ...}, 'documento': {...}}."""
     resumen: dict[str, dict[str, int]] = {"movimiento": {}, "documento": {}}
     for lado, estado, cantidad in conexion.execute(
         "SELECT lado, estado_revision, COUNT(*) FROM pendientes WHERE id_ejecucion = ? "

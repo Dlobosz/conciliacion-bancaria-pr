@@ -331,3 +331,29 @@ def test_leer_conciliaciones_incluye_las_manuales(ejecucion_guardada):
     assert len(despues) == antes + 1
     assert despues.loc[id_conciliacion, "ids_movimientos"] == "MOV-3"
     assert despues.loc[id_conciliacion, "ids_documentos"] == "DOC-4"
+
+
+def test_una_cartola_con_ids_repetidos_se_guarda_completa(conexion):
+    """Regresion: los ids duplicados rompian el guardado con UNIQUE constraint failed."""
+    from src.limpieza import limpiar_cartola, limpiar_libro_ventas
+
+    cartola = limpiar_cartola(
+        pd.DataFrame(
+            {
+                "id_movimiento": ["MOV-1", "MOV-1", ""],
+                "fecha": ["2025-06-03", "2025-06-04", "2025-06-05"],
+                "descripcion": ["A", "B", "C"],
+                "tipo": ["ABONO"] * 3,
+                "monto": ["100", "200", "300"],
+            }
+        )
+    )
+    ventas = limpiar_libro_ventas(
+        pd.DataFrame(
+            columns=["id_documento", "fecha_emision", "rut_cliente", "razon_social", "monto_total"]
+        )
+    )
+
+    id_ejecucion = guardar_ejecucion(conexion, cartola, ventas, conciliar(cartola, ventas))
+
+    assert len(leer_ejecucion(conexion, id_ejecucion)["movimientos"]) == 3

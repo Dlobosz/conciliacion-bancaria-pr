@@ -91,7 +91,9 @@ def calcular(
         "pct_automatico": _porcentaje(len(automaticas), len(conciliaciones)),
         "movimientos_pendientes": len(resultado.movimientos_pendientes),
         "documentos_pendientes": len(resultado.documentos_pendientes),
-        "monto_conciliado": float(conciliaciones["monto_banco"].sum()) if not conciliaciones.empty else 0.0,
+        "monto_conciliado": (
+            float(conciliaciones["monto_banco"].sum()) if not conciliaciones.empty else 0.0
+        ),
         "monto_pendiente": float(resultado.movimientos_pendientes["monto"].abs().sum())
         if not resultado.movimientos_pendientes.empty
         else 0.0,

@@ -38,7 +38,8 @@ CLASIFICACIONES = [
     "otro",
 ]
 
-INSTRUCCIONES = """Eres un asistente contable que ayuda a conciliar la cartola bancaria de una PyME chilena.
+INSTRUCCIONES = """Eres un asistente contable que ayuda a conciliar la cartola bancaria
+de una PyME chilena.
 
 Un motor deterministico ya cruzo todo lo que se podia cruzar por RUT, monto y fecha.
 Lo que recibes son SOLO los casos que ese motor no logro resolver.

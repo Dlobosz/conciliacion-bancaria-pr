@@ -9,6 +9,7 @@ from src.limpieza import (
     digito_verificador,
     extraer_contraparte,
     extraer_rut,
+    ids_unicos,
     limpiar_cartola,
     limpiar_libro_ventas,
     normalizar_fecha,
@@ -175,3 +176,80 @@ def test_limpiar_libro_ventas():
     assert limpio.loc[0, "monto_total"] == 1_500_000.0
     assert limpio.loc[0, "contraparte"] == "COMERCIAL LOS ALERCES"
     assert limpio.loc[0, "fecha_emision"] == pd.Timestamp("2025-06-01")
+
+
+# ------------------------------------------------- regresiones de la auditoria
+
+
+def test_tipo_vacio_no_convierte_un_cargo_en_abono():
+    """Regresion: con la columna 'tipo' en blanco el signo del monto debe respetarse.
+
+    Antes se forzaba a positivo, y una comision bancaria terminaba compitiendo
+    por conciliarse contra una factura de venta.
+    """
+    crudo = pd.DataFrame(
+        {
+            "fecha": ["2025-06-03", "2025-06-04"],
+            "descripcion": ["CARGO SIN TIPO", "OTRO CARGO"],
+            "tipo": ["", "DESCONOCIDO"],
+            "monto": ["-45000", "-9900"],
+        }
+    )
+    limpio = limpiar_cartola(crudo)
+
+    assert limpio["monto"].tolist() == [-45_000.0, -9_900.0]
+    assert limpio["tipo"].tolist() == ["CARGO", "CARGO"]
+
+
+def test_tipo_explicito_manda_sobre_el_signo():
+    crudo = pd.DataFrame(
+        {
+            "fecha": ["2025-06-03"],
+            "descripcion": ["COMISION"],
+            "tipo": ["CARGO"],
+            "monto": ["9900"],  # el banco lo exporta sin signo
+        }
+    )
+    assert limpiar_cartola(crudo).loc[0, "monto"] == -9_900.0
+
+
+@pytest.mark.parametrize(
+    "crudos, esperados",
+    [
+        (["MOV-1", "MOV-1"], ["MOV-1", "MOV-1-2"]),
+        (["", ""], ["MOV-0001", "MOV-0002"]),
+        (["MOV-1", "MOV-1", " MOV-1 "], ["MOV-1", "MOV-1-2", "MOV-1-3"]),
+        (["MOV-1", "MOV-1-2", "MOV-1"], ["MOV-1", "MOV-1-2", "MOV-1-3"]),
+    ],
+)
+def test_ids_unicos(crudos, esperados):
+    assert ids_unicos(pd.Series(crudos), "MOV", len(crudos)) == esperados
+
+
+def test_ids_duplicados_no_hacen_desaparecer_un_movimiento():
+    """Regresion: dos filas con el mismo id colapsaban y una quedaba fuera del informe."""
+    crudo = pd.DataFrame(
+        {
+            "id_movimiento": ["MOV-1", "MOV-1", ""],
+            "fecha": ["2025-06-03"] * 3,
+            "descripcion": ["A", "B", "C"],
+            "tipo": ["ABONO"] * 3,
+            "monto": ["100", "200", "300"],
+        }
+    )
+    limpio = limpiar_cartola(crudo)
+
+    assert len(limpio) == 3
+    assert limpio["id_movimiento"].is_unique
+
+
+def test_los_documentos_tambien_tienen_id_unico():
+    crudo = pd.DataFrame(
+        {
+            "id_documento": ["DOC-1", "DOC-1"],
+            "fecha_emision": ["2025-06-03", "2025-06-04"],
+            "rut_cliente": ["76.123.456-0"] * 2,
+            "monto_total": ["100", "200"],
+        }
+    )
+    assert limpiar_libro_ventas(crudo)["id_documento"].is_unique

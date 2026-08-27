@@ -1,3 +1,6 @@
+# Dependencias de ejecucion (las que necesita la app en produccion).
+# Las de desarrollo estan en requirements-dev.txt
+
 # Manipulacion de datos
 pandas==2.2.3
 openpyxl==3.1.5
@@ -11,7 +14,3 @@ streamlit==1.40.2
 # Cliente LLM (solo para excepciones)
 anthropic==1.1.0
 python-dotenv==1.0.1
-
-# Testing
-pytest==8.3.4
-pytest-cov==6.0.0

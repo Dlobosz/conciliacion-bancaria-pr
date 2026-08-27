@@ -96,6 +96,12 @@ dos veces:
 | 5 | `uno_a_n` | Suma de subconjuntos acotada por RUT y ventana de fechas | 0.88 |
 | 6 | `n_a_1` | Varias cuotas suman una factura (ventana ampliada a 20 días) | 0.88 |
 
+Las conciliaciones bajo `UMBRAL_AUTOMATICO` (0.90) se proponen pero se marcan
+`requiere_revision`. El umbral está calibrado para que la marca signifique algo: por encima
+quedan las pasadas que cruzan por identidad (RUT + monto) y las comisiones; por debajo caen las
+dos familias que **infieren** —los N-a-N, porque una suma de subconjuntos puede cuadrar por
+casualidad, y los fuzzy con score justo en el límite.
+
 En las pasadas 4 a 6 **el monto es siempre condición dura**: el nombre solo desempata entre
 documentos que ya calzan en plata, nunca al revés. Si dos candidatos empatan en similitud, el
 motor no adivina: manda el caso a revisión.
@@ -134,8 +140,8 @@ revisados.
 | **Precisión** (matches correctos / propuestos) | **100%** — 38/38, cero falsos positivos |
 | **Cobertura** (correctos / esperados) | **95%** — 38 de 40 relaciones |
 | Pagos con respaldo conciliados | 34 de 36 (94%) |
-| Conciliaciones sobre el umbral automático | 100% |
-| Cobertura de tests de `matching.py` | 98% (97% del paquete `src/`, 120 tests) |
+| Conciliaciones sin marca de revisión | 26 de 31 (84%) |
+| Cobertura de tests de `matching.py` | 99% (97% del paquete `src/`, 133 tests) |
 | Tiempo estimado ahorrado | ~87% del trabajo manual del período |
 
 Desglose de las 31 conciliaciones: 14 exactas, 5 por tolerancia de fecha, 5 fuzzy, 3 de 1-a-N,
@@ -181,7 +187,7 @@ la contabilidad, mientras que uno que falta solo queda pendiente de revisión.
 │   ├── persistencia.py     SQLite (6 tablas) + ciclo de revisión humana
 │   ├── metricas.py         KPIs, precisión y cobertura
 │   └── pipeline.py         orquestador end-to-end + CLI
-├── tests/                  120 tests
+├── tests/                  133 tests
 └── data/raw/               cartola, libro de ventas y ground truth sintéticos
 ```
 
@@ -195,14 +201,14 @@ solo se invoca para pendientes. `app.py` solo presenta.
 ```bash
 python -m venv venv
 venv\Scripts\activate            # Windows  (source venv/bin/activate en Linux/Mac)
-pip install -r requirements.txt
+pip install -r requirements-dev.txt   # requirements.txt solo para ejecutar
 
 python -m src.generar_datos      # regenerar los datos sintéticos (opcional, ya vienen)
 python -m src.pipeline           # conciliación completa por consola
 python -m src.pipeline --ia      # incluyendo el análisis de pendientes con LLM
 streamlit run app.py             # dashboard en http://localhost:8501
 
-pytest                           # 120 tests
+pytest                           # 133 tests
 pytest --cov                     # con reporte de cobertura
 ```
 
@@ -230,6 +236,8 @@ docker run -p 8501:8501 --env-file .env conciliador
 - **Los umbrales requieren calibración** por empresa. El umbral fuzzy de 85 y la ventana de 5 días
   funcionan con estos datos; son ajustables desde el dashboard y desde `ParametrosMatching`.
 - **Un solo período a la vez.** Un pago de una factura del mes anterior queda fuera de la ventana.
+- **La imagen Docker corre como root** y no está verificada en este entorno (el daemon local no
+  puede levantar contenedores nuevos). El `Dockerfile` está revisado estáticamente.
 - **Sin autenticación ni multiusuario.** Es una herramienta de escritorio; escalar a multiusuario
   implica migrar a PostgreSQL (ya está dockerizado, así que el camino está preparado).
 
