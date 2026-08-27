@@ -269,3 +269,95 @@ class AnalizadorExcepciones:
     def errores(self) -> list[str]:
         """Movimientos que no se pudieron analizar en la ultima corrida."""
         return list(self._errores)
+
+
+# Precio por millon de tokens del modelo por defecto, para estimar el costo de una
+# corrida. Solo sirve para dimensionar: la factura real la manda el proveedor.
+PRECIO_ENTRADA_POR_MTOK = 1.0
+PRECIO_SALIDA_POR_MTOK = 5.0
+
+# Caso de juguete para la verificacion: no toca los datos del proyecto.
+CASO_DE_PRUEBA = {
+    "id_movimiento": "MOV-PRUEBA",
+    "fecha": "2025-06-14",
+    "descripcion": "TRANSF FERRETERIA INDUSTR",
+    "monto": 2_032_800.0,
+    "rut": "",
+    "motivo": "sin_documento_calzado",
+}
+CANDIDATOS_DE_PRUEBA = [
+    {
+        "id_documento": "DOC-PRUEBA",
+        "fecha_emision": "2025-06-14",
+        "razon_social": "FERRETERIA INDUSTRIAL MAIPO LTDA",
+        "rut": "76901234-1",
+        "monto_total": 2_032_800.0,
+        "similitud_de_nombre": "80",
+    }
+]
+
+
+def verificar_configuracion() -> int:
+    """Hace UNA llamada minima para comprobar que la API responde y cuanto cuesta.
+
+    Sirve para validar la configuracion antes de correr el pipeline completo:
+    si falta la key o no hay saldo, el error se ve aca y no a mitad de una
+    conciliacion.
+
+    Ejecutar:  python -m src.ia
+    """
+    analizador = AnalizadorExcepciones()
+
+    print(f"Modelo: {analizador.modelo}")
+    if not analizador.disponible():
+        print("\nNo hay ANTHROPIC_API_KEY configurada.")
+        print("Copia .env.example a .env y completa la key.")
+        print("Sin key el pipeline funciona igual: los pendientes quedan")
+        print("clasificados por el motor deterministico, solo sin sugerencia de IA.")
+        return 1
+
+    print("Enviando un caso de prueba...\n")
+    try:
+        cliente = analizador._obtener_cliente()
+        respuesta = cliente.messages.create(
+            model=analizador.modelo,
+            max_tokens=analizador.max_tokens,
+            system=INSTRUCCIONES,
+            messages=[
+                {
+                    "role": "user",
+                    "content": analizador._describir_caso(CASO_DE_PRUEBA, CANDIDATOS_DE_PRUEBA),
+                }
+            ],
+            output_config={"format": {"type": "json_schema", "schema": ESQUEMA_RESPUESTA}},
+        )
+    except Exception as error:  # noqa: BLE001 - aca queremos el mensaje tal cual
+        print(f"La llamada fallo: {type(error).__name__}")
+        print(f"  {error}")
+        if "credit" in str(error).lower() or "balance" in str(error).lower():
+            print("\nLa cuenta no tiene saldo. No se cobro nada: la API es prepaga")
+            print("y rechaza la llamada antes de ejecutarla.")
+        return 1
+
+    texto = next((b.text for b in respuesta.content if b.type == "text"), "{}")
+    analisis = analizador._validar(
+        json.loads(texto), CASO_DE_PRUEBA, {c["id_documento"] for c in CANDIDATOS_DE_PRUEBA}
+    )
+
+    print("Respuesta recibida y validada:")
+    print(f"  clasificacion : {analisis.clasificacion}")
+    print(f"  sugerencia    : {analisis.id_documento_sugerido or '(ninguna)'}")
+    print(f"  confianza     : {analisis.confianza}")
+    print(f"  explicacion   : {analisis.explicacion}")
+
+    uso = respuesta.usage
+    costo = (
+        uso.input_tokens * PRECIO_ENTRADA_POR_MTOK + uso.output_tokens * PRECIO_SALIDA_POR_MTOK
+    ) / 1_000_000
+    print(f"\nTokens: {uso.input_tokens} de entrada, {uso.output_tokens} de salida")
+    print(f"Costo de esta llamada: US$ {costo:.6f}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(verificar_configuracion())

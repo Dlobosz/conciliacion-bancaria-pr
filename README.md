@@ -206,6 +206,7 @@ venv\Scripts\activate            # Windows  (source venv/bin/activate en Linux/M
 pip install -r requirements-dev.txt   # requirements.txt solo para ejecutar
 
 python -m src.generar_datos      # regenerar los datos sintéticos (opcional, ya vienen)
+python -m src.ia                 # verifica la configuración del LLM (1 llamada mínima)
 python -m src.pipeline           # conciliación completa por consola
 python -m src.pipeline --ia      # incluyendo el análisis de pendientes con LLM
 streamlit run app.py             # dashboard en http://localhost:8501
@@ -218,6 +219,10 @@ ruff check src tests app.py      # linter
 Para habilitar la IA, copiar `.env.example` a `.env` y completar `ANTHROPIC_API_KEY`. Sin la key
 el pipeline funciona igual: la conciliación determinística está completa y los pendientes quedan
 clasificados por el motor.
+
+`python -m src.ia` hace una sola llamada de prueba y reporta la respuesta validada, los tokens
+consumidos y el costo. Sirve para confirmar la configuración antes de correr el pipeline entero:
+si falta la key o la cuenta no tiene saldo, el error aparece ahí y no a mitad de una conciliación.
 
 ### Docker
 
