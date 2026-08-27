@@ -101,6 +101,12 @@ CREATE TABLE IF NOT EXISTS pendientes (
     sugerencia_ia   TEXT,
     confianza_ia    REAL,
     explicacion_ia  TEXT,
+    estado_revision TEXT NOT NULL DEFAULT 'pendiente'
+        CHECK (estado_revision IN ('pendiente', 'conciliado_manual', 'descartado')),
+    resuelto_con           TEXT,
+    id_conciliacion_manual TEXT,
+    comentario_revision    TEXT,
+    fecha_revision         TEXT,
     PRIMARY KEY (id_ejecucion, lado, id_item)
 );
 
@@ -121,9 +127,29 @@ def conectar(ruta_db: str | Path = DB_POR_DEFECTO) -> sqlite3.Connection:
     return conexion
 
 
+# Columnas de revision humana agregadas despues de la primera version del esquema.
+# Se migran con ALTER TABLE para no perder las bases que ya existan.
+COLUMNAS_REVISION = {
+    "estado_revision": "TEXT NOT NULL DEFAULT 'pendiente'",
+    "resuelto_con": "TEXT",
+    "id_conciliacion_manual": "TEXT",
+    "comentario_revision": "TEXT",
+    "fecha_revision": "TEXT",
+}
+
+
 def crear_esquema(conexion: sqlite3.Connection) -> None:
     conexion.executescript(ESQUEMA)
+    _migrar_pendientes(conexion)
     conexion.commit()
+
+
+def _migrar_pendientes(conexion: sqlite3.Connection) -> None:
+    """Agrega las columnas de revision a una base creada con el esquema anterior."""
+    existentes = {fila[1] for fila in conexion.execute("PRAGMA table_info(pendientes)")}
+    for columna, definicion in COLUMNAS_REVISION.items():
+        if columna not in existentes:
+            conexion.execute(f"ALTER TABLE pendientes ADD COLUMN {columna} {definicion}")
 
 
 def _fechas_a_texto(df: pd.DataFrame, columnas: list[str]) -> pd.DataFrame:
@@ -276,6 +302,38 @@ def leer_tabla(conexion: sqlite3.Connection, tabla: str, id_ejecucion: int) -> p
     return df
 
 
+def leer_conciliaciones(conexion: sqlite3.Connection, id_ejecucion: int) -> pd.DataFrame:
+    """Conciliaciones de una ejecucion con la misma forma que devuelve el motor.
+
+    Reconstruye ids_movimientos / ids_documentos desde la tabla puente, para que
+    lo guardado y lo calculado en memoria se puedan usar indistintamente. Incluye
+    las conciliaciones creadas en revision humana.
+    """
+    conciliaciones = leer_tabla(conexion, "conciliaciones", id_ejecucion)
+    if conciliaciones.empty:
+        return conciliaciones.assign(ids_movimientos="", ids_documentos="")
+
+    items = leer_tabla(conexion, "conciliacion_items", id_ejecucion)
+    agrupados = (
+        items.groupby(["id_conciliacion", "lado"])["id_item"]
+        .apply(lambda ids: "|".join(sorted(ids)))
+        .unstack(fill_value="")
+        .reindex(columns=["movimiento", "documento"], fill_value="")
+    )
+
+    conciliaciones = conciliaciones.merge(
+        agrupados.rename(columns={"movimiento": "ids_movimientos", "documento": "ids_documentos"}),
+        left_on="id_conciliacion",
+        right_index=True,
+        how="left",
+    )
+    conciliaciones[["ids_movimientos", "ids_documentos"]] = conciliaciones[
+        ["ids_movimientos", "ids_documentos"]
+    ].fillna("")
+    conciliaciones["requiere_revision"] = conciliaciones["requiere_revision"].astype(bool)
+    return conciliaciones
+
+
 def leer_ejecucion(conexion: sqlite3.Connection, id_ejecucion: int | None = None) -> dict:
     """Devuelve todas las tablas de una ejecucion (por defecto, la ultima)."""
     id_ejecucion = id_ejecucion or ultima_ejecucion(conexion)
@@ -313,3 +371,197 @@ def guardar_sugerencia_ia(
         (clasificacion, sugerencia, confianza, explicacion, id_ejecucion, lado, id_item),
     )
     conexion.commit()
+
+
+# --------------------------------------------------------------------------------------
+# Revision humana
+#
+# Es el paso que cierra el proceso: el motor propone y la IA sugiere, pero un caso
+# pendiente solo pasa a conciliado cuando una persona lo confirma. Lo que se decide
+# aqui queda como una conciliacion mas, con estrategia 'revision_humana', de modo
+# que las metricas y las descargas la incluyen sin logica aparte.
+# --------------------------------------------------------------------------------------
+
+ESTRATEGIA_MANUAL = "revision_humana"
+
+
+class RevisionInvalidaError(ValueError):
+    """La decision de revision no se puede aplicar (item inexistente, ya resuelto, doc ocupado)."""
+
+
+def _pendiente(conexion: sqlite3.Connection, id_ejecucion: int, lado: str, id_item: str) -> dict:
+    fila = conexion.execute(
+        "SELECT * FROM pendientes WHERE id_ejecucion = ? AND lado = ? AND id_item = ?",
+        (id_ejecucion, lado, id_item),
+    ).fetchone()
+    if fila is None:
+        raise RevisionInvalidaError(f"{id_item} no figura como pendiente de la ejecucion {id_ejecucion}")
+
+    columnas = [d[0] for d in conexion.execute("SELECT * FROM pendientes LIMIT 0").description]
+    pendiente = dict(zip(columnas, fila))
+    if pendiente["estado_revision"] != "pendiente":
+        raise RevisionInvalidaError(
+            f"{id_item} ya fue resuelto ({pendiente['estado_revision']}); reabrelo antes de cambiarlo"
+        )
+    return pendiente
+
+
+def _monto_de(conexion: sqlite3.Connection, tabla: str, id_ejecucion: int, id_item: str) -> float:
+    columna_id = "id_movimiento" if tabla == "movimientos" else "id_documento"
+    columna_monto = "monto" if tabla == "movimientos" else "monto_total"
+    fila = conexion.execute(
+        f"SELECT {columna_monto} FROM {tabla} WHERE id_ejecucion = ? AND {columna_id} = ?",
+        (id_ejecucion, id_item),
+    ).fetchone()
+    if fila is None:
+        raise RevisionInvalidaError(f"{id_item} no existe en la ejecucion {id_ejecucion}")
+    return abs(float(fila[0]))
+
+
+def conciliar_manualmente(
+    conexion: sqlite3.Connection,
+    id_ejecucion: int,
+    id_movimiento: str,
+    id_documento: str,
+    comentario: str = "",
+    usuario: str = "revision_humana",
+) -> str:
+    """Confirma a mano que un movimiento pendiente corresponde a un documento.
+
+    Se mantiene la misma invariante que el motor deterministico: ni el movimiento
+    ni el documento pueden estar ya usados en otra conciliacion.
+    """
+    _pendiente(conexion, id_ejecucion, "movimiento", id_movimiento)
+    _pendiente(conexion, id_ejecucion, "documento", id_documento)
+
+    ocupado = conexion.execute(
+        "SELECT id_conciliacion FROM conciliacion_items "
+        "WHERE id_ejecucion = ? AND id_item IN (?, ?)",
+        (id_ejecucion, id_movimiento, id_documento),
+    ).fetchone()
+    if ocupado:
+        raise RevisionInvalidaError(
+            f"{id_movimiento} o {id_documento} ya participan en la conciliacion {ocupado[0]}"
+        )
+
+    monto_banco = _monto_de(conexion, "movimientos", id_ejecucion, id_movimiento)
+    monto_documento = _monto_de(conexion, "documentos", id_ejecucion, id_documento)
+
+    correlativo = conexion.execute(
+        "SELECT COUNT(*) FROM conciliaciones WHERE id_ejecucion = ? AND estrategia = ?",
+        (id_ejecucion, ESTRATEGIA_MANUAL),
+    ).fetchone()[0]
+    id_conciliacion = f"CON-M{correlativo + 1:03d}"
+
+    detalle = f"Confirmado en revision humana ({usuario})"
+    if comentario:
+        detalle = f"{detalle}: {comentario}"
+
+    conexion.execute(
+        "INSERT INTO conciliaciones (id_ejecucion, id_conciliacion, estrategia, confianza, "
+        "requiere_revision, n_movimientos, n_documentos, monto_banco, monto_documentos, "
+        "diferencia, detalle) VALUES (?, ?, ?, 1.0, 0, 1, 1, ?, ?, ?, ?)",
+        (
+            id_ejecucion,
+            id_conciliacion,
+            ESTRATEGIA_MANUAL,
+            monto_banco,
+            monto_documento,
+            round(monto_documento - monto_banco, 2),
+            detalle,
+        ),
+    )
+    conexion.executemany(
+        "INSERT INTO conciliacion_items (id_ejecucion, id_conciliacion, lado, id_item) "
+        "VALUES (?, ?, ?, ?)",
+        [
+            (id_ejecucion, id_conciliacion, "movimiento", id_movimiento),
+            (id_ejecucion, id_conciliacion, "documento", id_documento),
+        ],
+    )
+
+    ahora = datetime.now().isoformat(timespec="seconds")
+    for lado, id_item, contraparte in (
+        ("movimiento", id_movimiento, id_documento),
+        ("documento", id_documento, id_movimiento),
+    ):
+        conexion.execute(
+            "UPDATE pendientes SET estado_revision = 'conciliado_manual', resuelto_con = ?, "
+            "id_conciliacion_manual = ?, comentario_revision = ?, fecha_revision = ? "
+            "WHERE id_ejecucion = ? AND lado = ? AND id_item = ?",
+            (contraparte, id_conciliacion, comentario, ahora, id_ejecucion, lado, id_item),
+        )
+
+    conexion.commit()
+    return id_conciliacion
+
+
+def descartar_pendiente(
+    conexion: sqlite3.Connection,
+    id_ejecucion: int,
+    id_item: str,
+    motivo: str,
+    lado: str = "movimiento",
+) -> None:
+    """Cierra un pendiente que NO corresponde a ningun documento.
+
+    Es una resolucion legitima, no un error: una comision bancaria, un impuesto o
+    un pago duplicado quedan revisados y explicados, sin inventar un match.
+    """
+    _pendiente(conexion, id_ejecucion, lado, id_item)
+    if not motivo.strip():
+        raise RevisionInvalidaError("Hay que indicar por que se descarta el pendiente")
+
+    conexion.execute(
+        "UPDATE pendientes SET estado_revision = 'descartado', comentario_revision = ?, "
+        "fecha_revision = ? WHERE id_ejecucion = ? AND lado = ? AND id_item = ?",
+        (motivo, datetime.now().isoformat(timespec="seconds"), id_ejecucion, lado, id_item),
+    )
+    conexion.commit()
+
+
+def reabrir_pendiente(
+    conexion: sqlite3.Connection, id_ejecucion: int, id_item: str, lado: str = "movimiento"
+) -> None:
+    """Deshace una revision: borra la conciliacion manual si la hubo y vuelve a pendiente."""
+    fila = conexion.execute(
+        "SELECT estado_revision, id_conciliacion_manual FROM pendientes "
+        "WHERE id_ejecucion = ? AND lado = ? AND id_item = ?",
+        (id_ejecucion, lado, id_item),
+    ).fetchone()
+    if fila is None:
+        raise RevisionInvalidaError(f"{id_item} no figura como pendiente de la ejecucion {id_ejecucion}")
+    if fila[0] == "pendiente":
+        return
+
+    id_conciliacion = fila[1]
+    if id_conciliacion:
+        conexion.execute(
+            "DELETE FROM conciliacion_items WHERE id_ejecucion = ? AND id_conciliacion = ?",
+            (id_ejecucion, id_conciliacion),
+        )
+        conexion.execute(
+            "DELETE FROM conciliaciones WHERE id_ejecucion = ? AND id_conciliacion = ?",
+            (id_ejecucion, id_conciliacion),
+        )
+
+    # Reabre los dos lados: una conciliacion manual siempre involucra a ambos.
+    conexion.execute(
+        "UPDATE pendientes SET estado_revision = 'pendiente', resuelto_con = NULL, "
+        "id_conciliacion_manual = NULL, comentario_revision = NULL, fecha_revision = NULL "
+        "WHERE id_ejecucion = ? AND (id_conciliacion_manual = ? OR (lado = ? AND id_item = ?))",
+        (id_ejecucion, id_conciliacion or "", lado, id_item),
+    )
+    conexion.commit()
+
+
+def resumen_revision(conexion: sqlite3.Connection, id_ejecucion: int) -> dict:
+    """Cuantos pendientes hay en cada estado, por lado: {'movimiento': {...}, 'documento': {...}}."""
+    resumen: dict[str, dict[str, int]] = {"movimiento": {}, "documento": {}}
+    for lado, estado, cantidad in conexion.execute(
+        "SELECT lado, estado_revision, COUNT(*) FROM pendientes WHERE id_ejecucion = ? "
+        "GROUP BY lado, estado_revision",
+        (id_ejecucion,),
+    ):
+        resumen.setdefault(lado, {})[estado] = cantidad
+    return resumen

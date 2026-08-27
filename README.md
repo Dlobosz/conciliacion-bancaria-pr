@@ -72,7 +72,11 @@ data/raw/*.csv
      │
      ├──────────────► conciliaciones  ──► persistencia.py (SQLite)
      │
-     └──► pendientes ──► ia.py (LLM, structured outputs) ──► sugerencias con revisión humana
+     └──► pendientes ──► ia.py (LLM, structured outputs) ──► sugerencias
+                                     │
+                                     ▼
+                          revisión humana en el dashboard
+                     (confirmar → conciliación, o descartar con motivo)
                                      │
                                      ▼
                         metricas.py + app.py (Streamlit)
@@ -100,6 +104,24 @@ La suma de subconjuntos es exponencial, así que se acota por diseño: solo entr
 mismo RUT dentro de la ventana de fechas, máximo 12 candidatos, en grupos de hasta 4
 (C(12,4) = 495 combinaciones, milisegundos).
 
+### El ciclo se cierra con una persona
+
+El motor propone y la IA sugiere, pero **un pendiente solo pasa a conciliado cuando alguien lo
+confirma**. Desde el dashboard, cada movimiento pendiente tiene dos salidas:
+
+- **Conciliar con un documento** → se crea una conciliación con estrategia `revision_humana` y
+  confianza 1.0, indistinguible del resto para las métricas y las descargas. Se respeta la misma
+  invariante que el motor: ni el movimiento ni el documento pueden estar ya usados en otra
+  conciliación.
+- **Descartar con motivo** → resolución legítima para una comisión bancaria, un impuesto o un pago
+  duplicado: el caso queda cerrado y explicado, sin inventar un match.
+
+Ambas decisiones se persisten (`estado_revision`, `resuelto_con`, `comentario_revision`,
+`fecha_revision`) y son reversibles: *reabrir* borra la conciliación manual y devuelve los dos
+lados a pendiente. Sobre el set de prueba, confirmar la glosa ambigua y descartar los 4 cargos
+bancarios lleva la cobertura de 85% a 87,5% de abonos cerrados, con el 50% de los pendientes ya
+revisados.
+
 ---
 
 ## Resultados sobre el set de prueba
@@ -113,7 +135,7 @@ mismo RUT dentro de la ventana de fechas, máximo 12 candidatos, en grupos de ha
 | **Cobertura** (correctos / esperados) | **95%** — 38 de 40 relaciones |
 | Pagos con respaldo conciliados | 34 de 36 (94%) |
 | Conciliaciones sobre el umbral automático | 100% |
-| Cobertura de tests de `matching.py` | 98% (97% del paquete `src/`, 104 tests) |
+| Cobertura de tests de `matching.py` | 98% (97% del paquete `src/`, 120 tests) |
 | Tiempo estimado ahorrado | ~87% del trabajo manual del período |
 
 Desglose de las 31 conciliaciones: 14 exactas, 5 por tolerancia de fecha, 5 fuzzy, 3 de 1-a-N,
@@ -156,10 +178,10 @@ la contabilidad, mientras que uno que falta solo queda pendiente de revisión.
 │   ├── limpieza.py         normalización de montos, fechas, RUT y glosas
 │   ├── matching.py         motor determinístico (el núcleo)
 │   ├── ia.py               cliente LLM, solo para excepciones
-│   ├── persistencia.py     SQLite (6 tablas, todo bajo id_ejecucion)
+│   ├── persistencia.py     SQLite (6 tablas) + ciclo de revisión humana
 │   ├── metricas.py         KPIs, precisión y cobertura
 │   └── pipeline.py         orquestador end-to-end + CLI
-├── tests/                  104 tests
+├── tests/                  120 tests
 └── data/raw/               cartola, libro de ventas y ground truth sintéticos
 ```
 
@@ -180,7 +202,7 @@ python -m src.pipeline           # conciliación completa por consola
 python -m src.pipeline --ia      # incluyendo el análisis de pendientes con LLM
 streamlit run app.py             # dashboard en http://localhost:8501
 
-pytest                           # 104 tests
+pytest                           # 120 tests
 pytest --cov                     # con reporte de cobertura
 ```
 

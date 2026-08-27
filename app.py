@@ -18,6 +18,17 @@ from src.ia import AnalizadorExcepciones, IANoConfiguradaError
 from src.ingesta import ArchivoInvalidoError
 from src.matching import ParametrosMatching
 from src.metricas import calcular, precision_contra_verdad
+from src.persistencia import (
+    RevisionInvalidaError,
+    conciliar_manualmente,
+    conectar,
+    descartar_pendiente,
+    guardar_sugerencia_ia,
+    leer_conciliaciones,
+    leer_tabla,
+    reabrir_pendiente,
+    resumen_revision,
+)
 from src.pipeline import CARTOLA_POR_DEFECTO, VENTAS_POR_DEFECTO, ejecutar
 
 RAW = Path("data") / "raw"
@@ -36,6 +47,52 @@ def guardar_subida(archivo, nombre: str) -> Path:
     destino = Path(tempfile.gettempdir()) / f"conciliador_{nombre}{Path(archivo.name).suffix}"
     destino.write_bytes(archivo.getbuffer())
     return destino
+
+
+def leer_estado_guardado(id_ejecucion: int) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """Lee de SQLite el estado vigente: incluye lo conciliado en revision humana."""
+    conexion = conectar(DB)
+    try:
+        return (
+            leer_conciliaciones(conexion, id_ejecucion),
+            leer_tabla(conexion, "pendientes", id_ejecucion),
+            resumen_revision(conexion, id_ejecucion),
+        )
+    finally:
+        conexion.close()
+
+
+def aplicar_revision(accion, *args, **kwargs) -> None:
+    """Ejecuta una decision de revision y refresca la pantalla."""
+    conexion = conectar(DB)
+    try:
+        accion(conexion, *args, **kwargs)
+    except RevisionInvalidaError as error:
+        st.error(str(error))
+        return
+    finally:
+        conexion.close()
+    st.rerun()
+
+
+def guardar_sugerencias(id_ejecucion: int, sugerencias: pd.DataFrame) -> None:
+    """Deja lo que propuso la IA junto al pendiente, para que aparezca en la revision."""
+    if sugerencias.empty:
+        return
+    conexion = conectar(DB)
+    try:
+        for fila in sugerencias.itertuples():
+            guardar_sugerencia_ia(
+                conexion,
+                id_ejecucion,
+                fila.id_movimiento,
+                fila.clasificacion,
+                fila.id_documento_sugerido,
+                fila.confianza,
+                fila.explicacion,
+            )
+    finally:
+        conexion.close()
 
 
 def descargar(df: pd.DataFrame, nombre: str, etiqueta: str) -> None:
@@ -95,7 +152,18 @@ if conciliar_ahora or "ejecucion" not in st.session_state:
 
 ejecucion = st.session_state.ejecucion
 resultado = ejecucion.resultado
-metricas = calcular(ejecucion.movimientos, ejecucion.documentos, resultado)
+conciliaciones_db, pendientes_db, revision = leer_estado_guardado(ejecucion.id_ejecucion)
+metricas = calcular(ejecucion.movimientos, ejecucion.documentos, resultado, revision)
+
+# Estado de revision por item, para separar lo abierto de lo ya resuelto.
+estados = pendientes_db.set_index("id_item") if not pendientes_db.empty else pd.DataFrame()
+
+
+def estado_de(id_item: str, campo: str = "estado_revision", defecto: str = "pendiente"):
+    if estados.empty or id_item not in estados.index:
+        return defecto
+    valor = estados.loc[id_item, campo]
+    return defecto if pd.isna(valor) else valor
 
 
 # ----------------------------------------------------------------------- KPIs
@@ -107,12 +175,14 @@ st.caption(
 )
 
 kpi = st.columns(5)
-kpi[0].metric("Abonos conciliados", f"{metricas['pct_abonos_conciliados']}%",
-              f"{metricas['movimientos_conciliados']} de {metricas['total_abonos']}")
-kpi[1].metric("Conciliaciones", metricas["n_conciliaciones"],
-              f"{metricas['pct_automatico']}% automaticas")
-kpi[2].metric("Pendientes de revision", metricas["movimientos_pendientes"],
-              f"{metricas['documentos_pendientes']} facturas impagas", delta_color="off")
+kpi[0].metric("Abonos cerrados", f"{metricas['pct_abonos_cerrados']}%",
+              f"{metricas['movimientos_conciliados']} por el motor "
+              f"+ {metricas['conciliados_manualmente']} revisados")
+kpi[1].metric("Conciliaciones", len(conciliaciones_db),
+              f"{metricas['n_conciliaciones']} del motor + "
+              f"{metricas['conciliados_manualmente']} manuales")
+kpi[2].metric("Sin revisar", metricas["pendientes_sin_revisar"],
+              f"{metricas['pct_revisado']}% de los pendientes ya revisado", delta_color="off")
 kpi[3].metric("Monto conciliado", pesos(metricas["monto_conciliado"]))
 kpi[4].metric("Horas ahorradas (mes)", f"{metricas['horas_ahorradas']} h",
               f"vs {metricas['horas_manual']} h manual")
@@ -124,7 +194,7 @@ st.divider()
 
 tab_conciliado, tab_pendientes, tab_impagas, tab_metricas = st.tabs(
     [
-        f"Conciliado ({len(resultado.conciliaciones)})",
+        f"Conciliado ({len(conciliaciones_db)})",
         f"Pendientes ({len(resultado.movimientos_pendientes)})",
         f"Facturas impagas ({len(resultado.documentos_pendientes)})",
         "Metricas",
@@ -132,7 +202,9 @@ tab_conciliado, tab_pendientes, tab_impagas, tab_metricas = st.tabs(
 )
 
 with tab_conciliado:
-    conciliaciones = resultado.conciliaciones
+    # Se lee de la base, no de memoria: asi aparecen tambien las conciliaciones
+    # creadas en revision humana.
+    conciliaciones = conciliaciones_db.drop(columns=["id_ejecucion"], errors="ignore")
     if conciliaciones.empty:
         st.info("No se concilio ningun movimiento con los parametros actuales.")
     else:
@@ -167,13 +239,123 @@ with tab_pendientes:
     if pendientes.empty:
         st.success("No quedaron movimientos pendientes.")
     else:
+        pendientes = pendientes.assign(
+            estado=pendientes["id_movimiento"].map(lambda i: estado_de(i)),
+            resuelto_con=pendientes["id_movimiento"].map(
+                lambda i: estado_de(i, "resuelto_con", "")
+            ),
+        )
+        abiertos = pendientes[pendientes["estado"] == "pendiente"]
+        resueltos = pendientes[pendientes["estado"] != "pendiente"]
+
         st.dataframe(
-            pendientes,
+            abiertos.drop(columns=["estado", "resuelto_con"]),
             use_container_width=True,
             hide_index=True,
             column_config={"monto": st.column_config.NumberColumn("Monto", format="$%d")},
         )
         descargar(pendientes, "pendientes.csv", "Descargar pendientes (CSV)")
+
+        # ------------------------------------------------------- revision humana
+        st.subheader("Revision")
+        st.caption(
+            "El motor propone y la IA sugiere, pero un pendiente solo se cierra cuando una "
+            "persona lo confirma. Lo confirmado queda como una conciliacion mas, con "
+            "estrategia `revision_humana`."
+        )
+
+        if abiertos.empty:
+            st.success("Todos los pendientes fueron revisados.")
+        else:
+            id_movimiento = st.selectbox(
+                "Movimiento a revisar",
+                abiertos["id_movimiento"],
+                format_func=lambda i: (
+                    f"{i} · {abiertos.set_index('id_movimiento').loc[i, 'descripcion'][:45]} · "
+                    f"{pesos(abiertos.set_index('id_movimiento').loc[i, 'monto'])}"
+                ),
+            )
+            elegido = abiertos.set_index("id_movimiento").loc[id_movimiento]
+            st.caption(f"Motivo detectado por el motor: `{elegido['motivo']}`")
+
+            sugerencia_ia = estado_de(id_movimiento, "sugerencia_ia", "")
+            if sugerencia_ia:
+                st.info(
+                    f"La IA sugiere **{sugerencia_ia}** "
+                    f"(confianza {estado_de(id_movimiento, 'confianza_ia', 0):.0%}): "
+                    f"{estado_de(id_movimiento, 'explicacion_ia', '')}"
+                )
+
+            # Solo se ofrecen documentos que sigan libres: misma invariante que el motor.
+            documentos_libres = [
+                d
+                for d in resultado.documentos_pendientes["id_documento"]
+                if estado_de(d) == "pendiente"
+            ]
+            candidatos = [c.split(":")[0] for c in str(elegido["candidatos"] or "").split("|") if c]
+            opciones = [d for d in candidatos if d in documentos_libres] + [
+                d for d in documentos_libres if d not in candidatos
+            ]
+
+            resumen_documentos = resultado.documentos_pendientes.set_index("id_documento")
+            columna_doc, columna_comentario = st.columns([1, 2])
+            id_documento = columna_doc.selectbox(
+                "Documento que corresponde",
+                opciones,
+                format_func=lambda d: (
+                    f"{d} · {resumen_documentos.loc[d, 'razon_social'][:28]} · "
+                    f"{pesos(resumen_documentos.loc[d, 'monto_total'])}"
+                ),
+                index=0 if opciones else None,
+                placeholder="No hay documentos libres",
+            )
+            comentario = columna_comentario.text_input(
+                "Comentario / motivo",
+                placeholder="Ej: el cliente pago con la glosa mal escrita",
+            )
+
+            accion_izq, accion_der = st.columns(2)
+            if accion_izq.button(
+                "Conciliar con este documento", type="primary", use_container_width=True,
+                disabled=not opciones,
+            ):
+                aplicar_revision(
+                    conciliar_manualmente,
+                    ejecucion.id_ejecucion,
+                    id_movimiento,
+                    id_documento,
+                    comentario=comentario,
+                )
+            if accion_der.button(
+                "Descartar (no corresponde a una venta)", use_container_width=True
+            ):
+                if not comentario.strip():
+                    st.warning("Escribe el motivo antes de descartar el movimiento.")
+                else:
+                    aplicar_revision(
+                        descartar_pendiente,
+                        ejecucion.id_ejecucion,
+                        id_movimiento,
+                        comentario,
+                    )
+
+        if not resueltos.empty:
+            with st.expander(f"Ya revisados ({len(resueltos)})"):
+                for fila in resueltos.itertuples():
+                    detalle = (
+                        f"conciliado con **{fila.resuelto_con}**"
+                        if fila.estado == "conciliado_manual"
+                        else "descartado"
+                    )
+                    texto, boton = st.columns([4, 1])
+                    texto.markdown(
+                        f"`{fila.id_movimiento}` · {fila.descripcion[:50]} · "
+                        f"{pesos(fila.monto)} — {detalle}"
+                    )
+                    if boton.button("Reabrir", key=f"reabrir_{fila.id_movimiento}"):
+                        aplicar_revision(
+                            reabrir_pendiente, ejecucion.id_ejecucion, fila.id_movimiento
+                        )
 
         st.subheader("Analisis con IA")
         st.caption(
@@ -184,12 +366,12 @@ with tab_pendientes:
         analizador = AnalizadorExcepciones()
         if not analizador.disponible():
             st.info("Configura ANTHROPIC_API_KEY en un archivo .env para habilitar el analisis.")
-        elif st.button("Analizar pendientes con IA"):
+        elif st.button("Analizar pendientes con IA", disabled=abiertos.empty):
             try:
                 with st.spinner("Consultando al modelo..."):
-                    st.session_state.sugerencias = analizador.analizar_pendientes(
-                        pendientes, ejecucion.documentos
-                    )
+                    sugerencias = analizador.analizar_pendientes(abiertos, ejecucion.documentos)
+                st.session_state.sugerencias = sugerencias
+                guardar_sugerencias(ejecucion.id_ejecucion, sugerencias)
                 for error in analizador.errores:
                     st.warning(f"No se pudo analizar {error}")
             except IANoConfiguradaError as error:
@@ -211,6 +393,8 @@ with tab_pendientes:
 
 with tab_impagas:
     impagas = resultado.documentos_pendientes
+    if not impagas.empty:
+        impagas = impagas[impagas["id_documento"].map(lambda d: estado_de(d) == "pendiente")]
     if impagas.empty:
         st.success("Todas las facturas del periodo tienen pago registrado.")
     else:

@@ -9,10 +9,16 @@ import pytest
 
 from src.matching import conciliar
 from src.persistencia import (
+    RevisionInvalidaError,
+    conciliar_manualmente,
     conectar,
+    descartar_pendiente,
     guardar_ejecucion,
     guardar_sugerencia_ia,
+    leer_conciliaciones,
     leer_ejecucion,
+    reabrir_pendiente,
+    resumen_revision,
     ultima_ejecucion,
 )
 from tests.test_matching import doc, mov
@@ -162,3 +168,166 @@ def test_no_se_puede_guardar_un_lado_invalido(conexion, caso):
             "INSERT INTO pendientes (id_ejecucion, lado, id_item, motivo) VALUES (?, ?, ?, ?)",
             (id_ejecucion, "otro", "X", "motivo"),
         )
+
+
+# --------------------------------------------------------------- revision humana
+
+
+@pytest.fixture
+def ejecucion_guardada(conexion, caso):
+    movimientos, documentos, resultado = caso
+    return conexion, guardar_ejecucion(conexion, movimientos, documentos, resultado)
+
+
+def test_conciliar_manualmente_crea_una_conciliacion(ejecucion_guardada):
+    conexion, id_ejecucion = ejecucion_guardada
+
+    id_conciliacion = conciliar_manualmente(
+        conexion, id_ejecucion, "MOV-3", "DOC-4", comentario="Es el pago de esa factura"
+    )
+
+    datos = leer_ejecucion(conexion, id_ejecucion)
+    manual = datos["conciliaciones"].set_index("id_conciliacion").loc[id_conciliacion]
+    assert manual["estrategia"] == "revision_humana"
+    assert manual["confianza"] == 1.0
+    assert not manual["requiere_revision"]
+    assert "Es el pago de esa factura" in manual["detalle"]
+
+    items = datos["conciliacion_items"]
+    del_match = items[items["id_conciliacion"] == id_conciliacion]
+    assert set(del_match["id_item"]) == {"MOV-3", "DOC-4"}
+
+
+def test_conciliar_manualmente_marca_los_dos_lados(ejecucion_guardada):
+    conexion, id_ejecucion = ejecucion_guardada
+    conciliar_manualmente(conexion, id_ejecucion, "MOV-3", "DOC-4")
+
+    pendientes = leer_ejecucion(conexion, id_ejecucion)["pendientes"].set_index("id_item")
+    assert pendientes.loc["MOV-3", "estado_revision"] == "conciliado_manual"
+    assert pendientes.loc["DOC-4", "estado_revision"] == "conciliado_manual"
+    assert pendientes.loc["MOV-3", "resuelto_con"] == "DOC-4"
+
+
+def test_no_se_puede_resolver_dos_veces_el_mismo_pendiente(ejecucion_guardada):
+    conexion, id_ejecucion = ejecucion_guardada
+    conciliar_manualmente(conexion, id_ejecucion, "MOV-3", "DOC-4")
+
+    with pytest.raises(RevisionInvalidaError, match="ya fue resuelto"):
+        conciliar_manualmente(conexion, id_ejecucion, "MOV-3", "DOC-4")
+
+
+def test_no_se_puede_conciliar_un_item_que_no_esta_pendiente(ejecucion_guardada):
+    """MOV-1 ya lo concilio el motor: la revision no puede volver a usarlo."""
+    conexion, id_ejecucion = ejecucion_guardada
+
+    with pytest.raises(RevisionInvalidaError, match="no figura como pendiente"):
+        conciliar_manualmente(conexion, id_ejecucion, "MOV-1", "DOC-4")
+
+
+def test_descartar_pendiente_lo_cierra_sin_documento(ejecucion_guardada):
+    conexion, id_ejecucion = ejecucion_guardada
+
+    descartar_pendiente(conexion, id_ejecucion, "MOV-3", "Comision de mantencion, no es una venta")
+
+    datos = leer_ejecucion(conexion, id_ejecucion)
+    pendiente = datos["pendientes"].set_index("id_item").loc["MOV-3"]
+    assert pendiente["estado_revision"] == "descartado"
+    assert "Comision" in pendiente["comentario_revision"]
+    assert datos["conciliaciones"]["estrategia"].tolist().count("revision_humana") == 0
+
+
+def test_descartar_exige_un_motivo(ejecucion_guardada):
+    conexion, id_ejecucion = ejecucion_guardada
+    with pytest.raises(RevisionInvalidaError, match="por que se descarta"):
+        descartar_pendiente(conexion, id_ejecucion, "MOV-3", "   ")
+
+
+def test_reabrir_deshace_la_conciliacion_manual(ejecucion_guardada):
+    conexion, id_ejecucion = ejecucion_guardada
+    conciliaciones_antes = len(leer_ejecucion(conexion, id_ejecucion)["conciliaciones"])
+    conciliar_manualmente(conexion, id_ejecucion, "MOV-3", "DOC-4")
+
+    reabrir_pendiente(conexion, id_ejecucion, "MOV-3")
+
+    datos = leer_ejecucion(conexion, id_ejecucion)
+    assert len(datos["conciliaciones"]) == conciliaciones_antes
+    pendientes = datos["pendientes"].set_index("id_item")
+    assert pendientes.loc["MOV-3", "estado_revision"] == "pendiente"
+    assert pendientes.loc["DOC-4", "estado_revision"] == "pendiente"  # se reabren los dos lados
+
+
+def test_reabrir_un_descarte(ejecucion_guardada):
+    conexion, id_ejecucion = ejecucion_guardada
+    descartar_pendiente(conexion, id_ejecucion, "MOV-3", "no corresponde")
+
+    reabrir_pendiente(conexion, id_ejecucion, "MOV-3")
+
+    pendientes = leer_ejecucion(conexion, id_ejecucion)["pendientes"].set_index("id_item")
+    assert pendientes.loc["MOV-3", "estado_revision"] == "pendiente"
+
+
+def test_resumen_revision(ejecucion_guardada):
+    conexion, id_ejecucion = ejecucion_guardada
+    conciliar_manualmente(conexion, id_ejecucion, "MOV-3", "DOC-4")
+
+    resumen = resumen_revision(conexion, id_ejecucion)
+    assert resumen["movimiento"]["conciliado_manual"] == 1
+    assert resumen["documento"]["conciliado_manual"] == 1
+
+
+def test_todo_parte_como_pendiente(ejecucion_guardada):
+    conexion, id_ejecucion = ejecucion_guardada
+    resumen = resumen_revision(conexion, id_ejecucion)
+
+    assert "conciliado_manual" not in resumen["movimiento"]
+    assert resumen["movimiento"]["pendiente"] >= 1
+
+
+def test_una_base_del_esquema_viejo_se_migra(tmp_path):
+    """Una base creada antes de la revision humana no se pierde: se le agregan las columnas."""
+    ruta = tmp_path / "vieja.db"
+    vieja = sqlite3.connect(ruta)
+    vieja.execute(
+        "CREATE TABLE pendientes (id_ejecucion INTEGER, lado TEXT, id_item TEXT, motivo TEXT)"
+    )
+    vieja.execute("INSERT INTO pendientes VALUES (1, 'movimiento', 'MOV-9', 'sin_documento')")
+    vieja.commit()
+    vieja.close()
+
+    conexion = conectar(ruta)
+    columnas = {fila[1] for fila in conexion.execute("PRAGMA table_info(pendientes)")}
+    estado = conexion.execute("SELECT estado_revision FROM pendientes").fetchone()[0]
+    conexion.close()
+
+    assert {"estado_revision", "resuelto_con", "id_conciliacion_manual"} <= columnas
+    assert estado == "pendiente"
+
+
+def test_leer_conciliaciones_reconstruye_los_ids(ejecucion_guardada, caso):
+    """Lo guardado y lo calculado en memoria deben tener la misma forma."""
+    conexion, id_ejecucion = ejecucion_guardada
+    _, _, resultado = caso
+
+    guardadas = leer_conciliaciones(conexion, id_ejecucion).set_index("id_conciliacion")
+    en_memoria = resultado.conciliaciones.set_index("id_conciliacion")
+
+    for id_conciliacion, fila in en_memoria.iterrows():
+        assert guardadas.loc[id_conciliacion, "ids_movimientos"] == "|".join(
+            sorted(fila["ids_movimientos"].split("|"))
+        )
+        assert guardadas.loc[id_conciliacion, "ids_documentos"] == "|".join(
+            sorted(fila["ids_documentos"].split("|"))
+        )
+    assert guardadas["requiere_revision"].dtype == bool
+
+
+def test_leer_conciliaciones_incluye_las_manuales(ejecucion_guardada):
+    conexion, id_ejecucion = ejecucion_guardada
+    antes = len(leer_conciliaciones(conexion, id_ejecucion))
+
+    id_conciliacion = conciliar_manualmente(conexion, id_ejecucion, "MOV-3", "DOC-4")
+
+    despues = leer_conciliaciones(conexion, id_ejecucion).set_index("id_conciliacion")
+    assert len(despues) == antes + 1
+    assert despues.loc[id_conciliacion, "ids_movimientos"] == "MOV-3"
+    assert despues.loc[id_conciliacion, "ids_documentos"] == "DOC-4"

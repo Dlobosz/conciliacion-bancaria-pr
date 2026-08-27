@@ -108,3 +108,38 @@ def test_resumen_texto(caso):
     texto = resumen_texto(calcular(*caso))
     assert "2/2 abonos conciliados" in texto
     assert "pendientes de revision" in texto
+
+
+# --------------------------------------------------------------- revision humana
+
+
+def test_sin_revision_los_contadores_van_en_cero(caso):
+    m = calcular(*caso)
+
+    assert m["conciliados_manualmente"] == 0
+    assert m["pendientes_sin_revisar"] == m["movimientos_pendientes"]
+    assert m["pct_revisado"] == 0.0
+    assert m["pct_abonos_cerrados"] == m["pct_abonos_conciliados"]
+
+
+def test_la_revision_humana_suma_a_los_abonos_cerrados(caso):
+    movimientos, documentos, resultado = caso
+    revision = {"movimiento": {"conciliado_manual": 1}, "documento": {"conciliado_manual": 1}}
+
+    m = calcular(movimientos, documentos, resultado, revision)
+
+    assert m["conciliados_manualmente"] == 1
+    assert m["pendientes_sin_revisar"] == 0
+    assert m["pct_revisado"] == 100.0
+
+
+def test_un_descarte_tambien_cuenta_como_revisado(caso):
+    movimientos, documentos, resultado = caso
+    revision = {"movimiento": {"descartado": 1}}
+
+    m = calcular(movimientos, documentos, resultado, revision)
+
+    assert m["descartados_en_revision"] == 1
+    assert m["pendientes_sin_revisar"] == 0
+    # descartar no concilia nada: el % de abonos cerrados no se mueve
+    assert m["pct_abonos_cerrados"] == m["pct_abonos_conciliados"]

@@ -37,8 +37,13 @@ def calcular(
     movimientos: pd.DataFrame,
     documentos: pd.DataFrame,
     resultado: ResultadoConciliacion,
+    revision: dict | None = None,
 ) -> dict:
-    """Resumen cuantitativo de una conciliacion."""
+    """Resumen cuantitativo de una conciliacion.
+
+    `revision` es el dict que devuelve persistencia.resumen_revision(): permite
+    separar lo que resolvio el motor de lo que confirmo una persona.
+    """
     conciliaciones = resultado.conciliaciones
 
     # Los cargos (comisiones, remuneraciones, impuestos) no se cruzan contra ventas:
@@ -54,10 +59,26 @@ def calcular(
         else conciliaciones
     )
 
+    # Lo que una persona ya reviso: confirmado a mano o descartado con motivo.
+    por_lado = (revision or {}).get("movimiento", {})
+    conciliados_manual = por_lado.get("conciliado_manual", 0)
+    descartados = por_lado.get("descartado", 0)
+    sin_revisar = max(len(resultado.movimientos_pendientes) - conciliados_manual - descartados, 0)
+
     minutos_manual = len(movimientos) * MINUTOS_POR_MOVIMIENTO_MANUAL
     minutos_con_sistema = len(resultado.movimientos_pendientes) * MINUTOS_POR_PENDIENTE_REVISADO
 
     return {
+        "conciliados_manualmente": conciliados_manual,
+        "descartados_en_revision": descartados,
+        "pendientes_sin_revisar": sin_revisar,
+        "pct_revisado": _porcentaje(
+            conciliados_manual + descartados, len(resultado.movimientos_pendientes)
+        ),
+        "pct_abonos_cerrados": _porcentaje(
+            len(_ids_conciliados(conciliaciones, "ids_movimientos")) + conciliados_manual,
+            len(abonos),
+        ),
         "total_movimientos": len(movimientos),
         "total_abonos": len(abonos),
         "total_documentos": len(documentos),
